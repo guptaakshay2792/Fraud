@@ -1,0 +1,232 @@
+```{r Import data (development)}
+dir<-"Data/Supervised_reports/"
+setwd(dir)
+dev <- read.csv("Data/model_input/data_for_supervised.csv")
+dev$TARGET <- dev$Y_DEF_UNION
+dev$Y_DEF_UNION <- NULL
+```
+
+```{r univariate function}
+univariate<-function(dev){
+  fac_summary<-charSummary(dev)
+  write.csv(fac_summary, "Univarite_factor.csv")
+  x <- as.data.frame(cbind(Var = rownames(fac_summary), fac_summary$`miss%`))
+  colnames(x) <- c("Var","Miss_Per")
+  rm(fac_summary)
+  gc()
+  
+  num_summary<-numSummary(dev)
+  write.csv(num_summary, "Univarite_num.csv")
+  y <- as.data.frame(cbind(Var = rownames(num_summary), num_summary$`miss%`))
+  colnames(y) <- c("Var","Miss_Per")
+  
+  rm(num_summary)
+  gc()
+  
+  
+  z<- rbind(x,y)
+  return(z)
+}
+
+```
+
+```{r call to generate univariate report and get missing percentage of each column}
+uni_miss_per <- univariate(dev)
+```
+
+
+```{r Recommendation fuction for removal of 0 variance and covariance columns}
+Recomm_Var_Covar_SD<-function(dev, target){
+  remove_sd<-function(x){
+    sd_non_na<-function(x){
+      x_tmp <- sd(x, na.rm = T)
+      return(x_tmp)
+    }
+    tmp <- as.data.frame(sapply(x[,sapply(x, is.numeric)],sd_non_na))
+    
+    x<- as.data.frame(tmp)
+    
+    return(cbind(Variable = row.names(x), x))
+    
+  }
+  
+  sd_num_dev<-remove_sd(dev)
+  colnames(sd_num_dev)<-c("Variable", "SD")
+  
+  remove_co_var<-function(x,target){
+    
+    
+    tmp <- var(scale(x[,sapply(x, is.numeric)]), scale(target), use = "pairwise.complete.obs")
+    
+    x<- as.data.frame(tmp)
+    
+    return(cbind(Variable = row.names(x), x))
+    
+  }
+  
+  
+  covar_num_dev <- remove_co_var(dev, target)
+  colnames(covar_num_dev)<-c("Variable", "COVAR")
+  
+  tmp<-as.data.frame(sapply(dev, class))
+  colnames(tmp) <- "Type"
+  
+  data_all_cols<- cbind(Variable = row.names(tmp), tmp)
+  
+  
+  
+  aks<-merge(
+    merge(data_all_cols, covar_num_dev, by.x= "Variable", by.y = "Variable", all.x = T),
+    sd_num_dev,
+    by.x = "Variable",
+    by.y = "Variable",
+    all.x = T
+  )  
+  
+  
+  hello<-charSummary(dev)
+  tmp<-rownames(hello)[hello$unique==1]
+  
+  
+  aks$Remove_0_Variance <- ifelse(aks$COVAR == 0, 1,0)
+  aks$Remove_0_Variance[aks$Type != "factor" & is.na(aks$COVAR)]<- 1
+  
+  aks$Remove_0_SD <- ifelse(aks$SD == 0, 1,0)
+  aks$Remove_0_SD[aks$Type != "factor" & is.na(aks$SD)]<- 1
+  
+  
+  aks$Remove_0_Variance[aks$Type == "factor" & is.na(aks$COVAR)]<- 0
+  aks$Remove_0_Variance[aks$Variable %in% tmp]<-1
+  
+  
+  aks$Remove_0_SD[aks$Type == "factor" & is.na(aks$SD)]<- 0
+  aks$Remove_0_SD[aks$Variable %in% tmp]<-1
+  
+  aks$Remove_var_covar_sd<-ifelse(aks$Remove_0_SD == 1 | aks$Remove_0_SD==1,1,0)
+  return(aks)
+}
+
+
+```
+
+
+```{r Call to function for removing 0 variance and covariance columns}
+
+aks<-Recomm_Var_Covar_SD(dev, dev$TARGET)
+write.csv(aks,"remove_var_cov_sd.csv")
+
+```
+
+  
+```{r Function to get corelation matrix of columns wth non zero variance and covariance}
+corelation_matrix<-function(data,ok_cols){
+  tmp<-data[,(colnames(data) %in% ok_cols$Variable[ok_cols$Remove_var_covar_sd==0])]
+  tmp_num <- tmp[,(sapply(tmp,is.numeric))]
+  
+  tmp_cor <- cor(tmp_num, use = "pairwise.complete.obs")
+  
+  #colnames(tmp_cor)[colSums(is.na(tmp_cor)) > 0]
+  cor_martix <- as.data.frame(cbind(Variable = rownames(tmp_cor), tmp_cor))
+  write.csv(cor_martix,"corelation.csv")
+  return(cor_martix)
+}
+```
+
+
+
+```{r Function call to generate corelation matrix}
+
+cor_martix<-corelation_matrix(dev,aks)
+write.csv(cor_martix,"Corelation.csv")
+```
+
+
+
+
+
+```{r Function to find highly corelated columns}
+
+comm_formation_cor<-function(cor_martix,cutoff){
+  tmp <- melt(cor_martix, id = c("Variable"))
+  # tmp$Corelation[<-as.numeric(as.character(tmp$Corelation))
+  colnames(tmp)<-c("Variable_1", "Variable_2", "Corelation")
+  a<-as.data.frame(tmp$Variable_1)
+  colnames(a)<-"node"
+  b<-as.data.frame(tmp$Variable_2)
+  colnames(b)<-"node"
+  node<-as.data.frame(unique(rbind(a,b)))
+  
+  
+  edges<-tmp[as.numeric(as.character(tmp$Corelation)) > cutoff & is.na(tmp$Corelation)==FALSE & tmp$Variable_1!=tmp$Variable_2,]
+  
+  
+  g <- graph_from_data_frame(edges, directed=FALSE, vertices=node)
+  sim_g<-simplify(g, remove.multiple = TRUE, remove.loops = TRUE)
+  #g1<- graph.data.frame(edges)
+  
+  
+  comm<-cluster_edge_betweenness(sim_g, weights = abs(E(g)$Corelation), directed = FALSE,
+                                 edge.betweenness = TRUE, merges = TRUE, bridges = TRUE,
+                                 modularity = TRUE, membership = TRUE)
+  
+  len_com<-length(comm)
+  edges$Community<-NA
+  
+  for(i in 1:len_com)
+  {
+    edges$Community <- ifelse(edges$Variable_1 %in% comm[[i]],i, edges$Community)
+  }
+  
+  x<-eigen_centrality(sim_g, directed = FALSE, scale = TRUE, weights = E(sim_g)$Corelation)
+  y<-as.data.frame(x$vector)
+  colnames(y)<-"En_vector"
+  b<-as.data.frame(cbind(rownames(y),y$En_vector))
+  colnames(b)<-c("Var","En_vector")
+  
+  z<-as.data.frame(degree(sim_g, v=V(sim_g)))
+  z1<-as.data.frame(cbind(Var = rownames(z),z))
+  colnames(z1)<-c("Var","Deg")
+  write.csv(z1,"deg_Cor_sim.csv")
+  
+  write.csv(b,"En_Vector_Cor_sim.csv")
+  
+  tmp_cumm <- unique(edges[,c("Variable_1","Community")])
+  tmp_cor_en_deg_cumm<- merge(merge(b,z1, by = "Var"), tmp_cumm, by.x = "Var", by.y = "Variable_1",all.x=T)
+  
+  tmp_cor_en_deg_cumm$num_en <- ave(as.numeric(as.character(tmp_cor_en_deg_cumm$En_vector)), tmp_cor_en_deg_cumm$Community, FUN = seq_along)
+  tmp_cor_en_deg_cumm$num_deg<- ave(as.numeric(as.character(tmp_cor_en_deg_cumm$Deg)), tmp_cor_en_deg_cumm$Community, FUN = seq_along)
+  tmp_cor_en_deg_cumm$sum_en_deg_rank<- tmp_cor_en_deg_cumm$num_en + tmp_cor_en_deg_cumm$num_deg
+  tmp_cor_en_deg_cumm$num<- ave(tmp_cor_en_deg_cumm$sum_en_deg_rank, tmp_cor_en_deg_cumm$Community, FUN = seq_along)
+  
+  tmp_cor_en_deg_cumm$En_vector <- as.factor(as.character(tmp_cor_en_deg_cumm$En_vector))
+  tmp_cor_en_deg_cumm$Deg <- as.factor(as.character(tmp_cor_en_deg_cumm$Deg))
+  
+  tmp_cor_en_deg_cumm$sum_en_deg_rank<-NULL
+  
+  return(tmp_cor_en_deg_cumm)
+}
+
+```
+
+
+```{r Function call to find highly corelated columns}
+cutoff<-0.8
+cor_en_deg_cumm<-comm_formation_cor(cor_martix,cutoff)
+#class(cor_en_deg_cumm$num)
+write.csv(cor_en_deg_cumm, "Var_Cum_Cor.csv", row.names = FALSE)
+
+```
+
+```{r Merging relavant information to generate report}
+tmp<-merge(merge(aks, cor_en_deg_cumm, by.x = "Variable", by.y = "Var", all.x = T), uni_miss_per, by.x = "Variable", by.y = "Var")
+```
+
+```{r Save report}
+
+report <- subset(tmp, select = c("Variable", "Type", "Community", "COVAR", 
+                                 "SD", "En_vector", "Deg", "num_en", "num_deg", "num","Miss_Per",
+                                 "Remove_0_Variance", "Remove_0_SD", "Remove_var_covar_sd"))
+
+write.csv(report, "Report.csv")
+```
+
