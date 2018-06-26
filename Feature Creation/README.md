@@ -3,5 +3,5 @@ Time-series
 Current
 Differential
 Incremental
-Resolved ontologies 
-Risks
+Graph
+Text
